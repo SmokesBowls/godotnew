@@ -9,4 +9,8 @@ Run:       godot --path /mnt/data-drive/devvm-projects/engain-chapter-selector
 Self-test: godot --headless --path /mnt/data-drive/devvm-projects/engain-chapter-selector -- --selftest
            (exit 0 when every catalog chapter appears in the tree)
 
-Not yet: source text, Mettaext output, placeholders, scene selection.
+Selecting a chapter shows its Mettaext extraction from GET 8765 /chapters/extraction, labelled
+CANDIDATE — not accepted (display only; nothing is sent to 8080).
+Extraction check: add --extract-check=<catalog_id> after --selftest.
+
+Not yet: placeholders, environment walkthrough, scene selection.

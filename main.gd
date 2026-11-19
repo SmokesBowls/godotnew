@@ -1,16 +1,23 @@
 extends Control
-## G01 chapter selector. Shows Tier 1's live catalog (GET 8765 /chapters/catalog) and nothing else.
+## G01 chapter selector. Shows Tier 1's live catalog (GET 8765 /chapters/catalog) and, for a selected
+## chapter, its Mettaext extraction (GET 8765 /chapters/extraction) labelled as a candidate (M01c).
 ## No cache: the list is fetched when the selector opens and on every Refresh, and cleared on any
 ## failure so a stale list is never shown as current. Godot decides nothing about the catalog.
 
 const DEFAULT_BASE_URL := "http://127.0.0.1:8765"
 const CATALOG_PATH := "/chapters/catalog"
+const EXTRACTION_PATH := "/chapters/extraction"
 const FLAG_COLOR := Color(1.0, 0.72, 0.3)
 
 var base_url: String = OS.get_environment("ENGAIN_TIER1_URL") if OS.has_environment("ENGAIN_TIER1_URL") else DEFAULT_BASE_URL
 var _selftest := OS.get_cmdline_user_args().has("--selftest")
+## --extract-check=<catalog_id>: with --selftest, also fetch that chapter's extraction and print it.
+var _extract_check := ""
 
 var _http: HTTPRequest
+var _xhttp: HTTPRequest  # extraction requests; separate so a catalog refresh never collides
+var _x_catalog_id := ""
+var _x_entry_text := ""
 var _summary: Label
 var _status: Label
 var _refresh: Button
@@ -24,6 +31,13 @@ func _ready() -> void:
 	_http.timeout = 15.0
 	add_child(_http)
 	_http.request_completed.connect(_on_request_completed)
+	_xhttp = HTTPRequest.new()
+	_xhttp.timeout = 15.0
+	add_child(_xhttp)
+	_xhttp.request_completed.connect(_on_extraction_completed)
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--extract-check="):
+			_extract_check = arg.trim_prefix("--extract-check=")
 	refresh()
 
 
@@ -89,7 +103,10 @@ func _show_catalog(vault: Dictionary, catalog: Dictionary) -> void:
 		var ok := shown == int(catalog.get("chapter_count", -1))
 		print("[selftest] vault=%s books=%d chapters=%d tree_items=%d %s" % [
 			vault.get("vault_id"), catalog.get("book_count"), catalog.get("chapter_count"), shown, "OK" if ok else "MISMATCH"])
-		get_tree().quit(0 if ok else 1)
+		if not ok or _extract_check.is_empty():
+			get_tree().quit(0 if ok else 1)
+		else:
+			_request_extraction(_extract_check)
 
 
 func _fail(message: String) -> void:
@@ -109,16 +126,98 @@ func _on_item_selected() -> void:
 	if not entry is Dictionary:
 		return
 	var flags: Array = entry.get("anomalies", [])
-	_detail.text = "\n".join(PackedStringArray([
+	_x_entry_text = "\n".join(PackedStringArray([
 		"[b]%s[/b]" % entry.get("file_name"),
 		"",
 		"catalog_id:     %s" % entry.get("catalog_id"),
 		"chapter_id:     %s  (legacy)" % entry.get("chapter_id"),
-		"leading_number: %s" % str(entry.get("leading_number")),
+		"leading_number: %s" % ("none" if entry.get("leading_number") == null else str(int(entry.get("leading_number")))),
 		"anomalies:      %s" % (", ".join(PackedStringArray(flags)) if not flags.is_empty() else "none"),
 		"source_sha256:  %s" % entry.get("source_sha256"),
 		"path:           %s" % entry.get("path"),
 	]))
+	_request_extraction(str(entry.get("catalog_id")))
+
+
+func _request_extraction(catalog_id: String) -> void:
+	_xhttp.cancel_request()  # a newer selection replaces any request still in flight
+	_x_catalog_id = catalog_id
+	_detail.text = _x_entry_text + "\n\n[b]Mettaext extraction[/b]\nLoading ..."
+	var err := _xhttp.request("%s%s?catalog_id=%s" % [base_url, EXTRACTION_PATH, catalog_id.uri_encode()])
+	if err != OK:
+		_show_extraction("[color=#ff8080]Could not start request (error %d)[/color]" % err)
+
+
+func _on_extraction_completed(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS:
+		_show_extraction("[color=#ff8080]8765 unreachable (HTTPRequest result %d)[/color]" % result)
+		return
+	var data: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if not data is Dictionary:
+		_show_extraction("[color=#ff8080]HTTP %d: response is not a JSON object[/color]" % code)
+		return
+	var d: Dictionary = data
+	if str(d.get("catalog_id", _x_catalog_id)) != _x_catalog_id:
+		return  # answer for an older selection
+	var state := str(d.get("extraction", ""))
+	var lines := PackedStringArray()
+	match state:
+		"candidate":
+			lines.append("[color=#ffb84d][b]CANDIDATE — not accepted[/b][/color]  (Mettaext output, display only)")
+			lines.append_array(_receipt_lines(d.get("receipt", {})))
+			var scenes: Dictionary = d.get("game_scenes", {})
+			for rel in scenes:
+				lines.append_array(_scene_lines(rel, scenes[rel]))
+		"failed":
+			lines.append("[color=#ff8080][b]Extraction FAILED[/b][/color]  (returncode %s; see run.log beside the receipt)" % str((d.get("receipt", {}) as Dictionary).get("returncode")))
+		"not_extracted":
+			lines.append("Not extracted yet. Run:")
+			lines.append("python3 -m tier1.engainos.tools.run_chapter_extraction --catalog-id \"%s\"" % _x_catalog_id)
+		"stale":
+			lines.append("[color=#ffb84d]Stale:[/color] the chapter changed after its last extraction; no output is shown for the current text.")
+			for prev in d.get("previous", []):
+				lines.append("  earlier run: source %s  (%s)" % [str(prev.get("source_sha256", "?")).left(12), prev.get("status", "?")])
+			lines.append("Re-run the extraction command for this catalog_id.")
+		_:
+			lines.append("[color=#ff8080]HTTP %d: %s[/color]" % [code, str(d.get("extraction", d.get("message", "error")))])
+	_show_extraction("\n".join(lines))
+	if _selftest and not _extract_check.is_empty():
+		var scene_count := (d.get("game_scenes", {}) as Dictionary).size()
+		print("[selftest] extraction catalog_id=%s http=%d state=%s scenes=%d" % [_x_catalog_id, code, state, scene_count])
+		get_tree().quit(0 if code in [200, 404] else 1)
+
+
+func _show_extraction(text: String) -> void:
+	_detail.text = _x_entry_text + "\n\n[b]Mettaext extraction[/b]\n" + text
+
+
+func _receipt_lines(r: Dictionary) -> PackedStringArray:
+	var ex: Dictionary = r.get("extractor", {})
+	return PackedStringArray([
+		"source_sha256:  %s" % str(r.get("source_sha256", "?")),
+		"extracted:      %s UTC" % Time.get_datetime_string_from_unix_time(int(r.get("finished_at", 0)), true),
+		"engain commit:  %s%s" % [str(ex.get("git_head", "?")).left(12), "  (mettaext dirty)" if ex.get("mettaext_dirty", false) else ""],
+		"driver:         %s" % str(ex.get("driver", "?")),
+	])
+
+
+func _scene_lines(rel: String, scene: Dictionary) -> PackedStringArray:
+	var meta: Dictionary = scene.get("metadata", {})
+	var out := PackedStringArray(["", "[b]%s[/b]  (%s)" % [scene.get("scene_id", "?"), rel],
+		"where: %s" % str(meta.get("where", "?")), "when:  %s" % str(meta.get("when", "?")),
+		"description: %s" % str(scene.get("description", ""))])
+	var ents: Array = scene.get("entities", [])
+	out.append("entities (%d):" % ents.size())
+	for e in ents:
+		if e is Dictionary:
+			out.append("  • %s  [%s]  id=%s" % [e.get("name", "?"), e.get("type", "?"), e.get("id", "?")])
+	var events: Array = scene.get("events", [])
+	out.append("events (%d):" % events.size())
+	for ev in events.slice(0, 12):
+		out.append("  • %s" % (JSON.stringify(ev) if not ev is String else ev).left(140))
+	var locs: Array = scene.get("locations", [])
+	out.append("locations (%d): %s" % [locs.size(), JSON.stringify(locs).left(200)])
+	return out
 
 
 func _format_counts(counts: Dictionary) -> String:
