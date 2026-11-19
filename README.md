@@ -14,3 +14,4 @@ CANDIDATE — not accepted (display only; nothing is sent to 8080).
 Extraction check: add --extract-check=<catalog_id> after --selftest.
 
 Not yet: placeholders, environment walkthrough, scene selection.
+# godotnew
