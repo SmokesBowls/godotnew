@@ -1,0 +1,19 @@
+; EngAIn chapter selector (G01). Display only: the catalog comes from Tier 1 (8765).
+
+config_version=5
+
+[application]
+
+config/name="EngAIn Chapter Selector"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.6", "GL Compatibility")
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=760
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
