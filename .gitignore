@@ -1,2 +1,5 @@
 .godot/
 *.tmp
+# EngAIn transport credentials and grant keys are minted at runtime; never commit them.
+*.key
+*.pem
