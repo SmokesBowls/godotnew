@@ -33,6 +33,8 @@ var _status: Label
 var _refresh: Button
 var _tree: Tree
 var _detail: RichTextLabel
+var _activate: Button
+var _link: Node  # EngAInRuntimeLink: the only path to 8080; used on explicit request only
 
 
 func _ready() -> void:
@@ -49,6 +51,9 @@ func _ready() -> void:
 	_ahttp.timeout = 15.0
 	add_child(_ahttp)
 	_ahttp.request_completed.connect(_on_assets_completed)
+	_link = preload("res://scripts/EngAInRuntimeLink.gd").new()
+	add_child(_link)
+	_link.set_surface_container(_scene_view.surface_container())
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--extract-check="):
 			_extract_check = arg.trim_prefix("--extract-check=")
@@ -235,6 +240,8 @@ func _try_render() -> void:
 	var code: int = _x_reply.code
 	var d: Dictionary = _x_reply.data
 	var state := str(d.get("extraction", ""))
+	# Inspection never activates; activation is a separate, explicit, signed request.
+	_activate.disabled = state != "candidate" or not _link.is_configured()["activate"]
 	var scenes: Dictionary = d.get("game_scenes", {}) if state == "candidate" else {}
 	var stats := {}
 	if scenes.is_empty():
@@ -257,6 +264,22 @@ func _try_render() -> void:
 			var err := get_viewport().get_texture().get_image().save_png(_screenshot)
 			print("[selftest] screenshot %s %s" % [_screenshot, "saved" if err == OK else "FAILED %d" % err])
 		get_tree().quit(0 if code in [200, 404] else 1)
+
+
+func _on_activate_pressed() -> void:
+	var catalog_id := _x_catalog_id
+	_activate.disabled = true
+	_status.text = "Requesting DRAFT activation of %s ..." % catalog_id
+	var result: Dictionary = await _link.activate_candidate(catalog_id)
+	if result.code == 200:
+		var stamp: Dictionary = result.body.get("scene_activation", {})
+		_status.text = "Runtime presenting %s (load %s of %s) — DRAFT, not accepted" % [
+			stamp.get("scene_id"), stamp.get("load_seq"), str(stamp.get("runtime_instance_id")).left(8)]
+	else:
+		var body: Variant = result.body
+		_status.text = "Activation refused (HTTP %d): %s" % [result.code,
+			JSON.stringify((body as Dictionary).get("errors", body.get("reason", body)) if body is Dictionary else body).left(300)]
+	_activate.disabled = _x_catalog_id != catalog_id or not _link.is_configured()["activate"]
 
 
 func _show_extraction(text: String) -> void:
@@ -315,6 +338,12 @@ func _build_ui() -> void:
 	_refresh.text = "Refresh"
 	_refresh.pressed.connect(refresh)
 	header.add_child(_refresh)
+	_activate = Button.new()
+	_activate.text = "Activate in runtime (DRAFT)"
+	_activate.tooltip_text = "Signed request to 8080. DRAFT runtime activation only — not canonical acceptance."
+	_activate.disabled = true
+	_activate.pressed.connect(_on_activate_pressed)
+	header.add_child(_activate)
 	_summary = Label.new()
 	_summary.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART

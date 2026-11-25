@@ -10,6 +10,7 @@ const PLACEMENT_NOTE := "placeholder layout — not narrative placement (positio
 
 var _banner: RichTextLabel
 var _actors: Node3D
+var _surfaces: Node3D  # runtime-authorized surfaces (EngAInRuntimeLink); never candidate content
 var _camera: Camera3D
 
 
@@ -46,6 +47,9 @@ func _ready() -> void:
 	_actors = Node3D.new()
 	_actors.name = "Actors"
 	vp.add_child(_actors)
+	_surfaces = Node3D.new()
+	_surfaces.name = "Surfaces"
+	vp.add_child(_surfaces)
 	show_message("Select a chapter to view its extracted entities.")
 
 
@@ -144,6 +148,12 @@ func _clear() -> void:
 	for child in _actors.get_children():
 		_actors.remove_child(child)
 		child.queue_free()
+
+
+## Parent for applied runtime surfaces. Candidate rendering never touches it; the live
+## executor frees its nodes when their runtime load stops being presented.
+func surface_container() -> Node3D:
+	return _surfaces
 
 
 func actor_count() -> int:
