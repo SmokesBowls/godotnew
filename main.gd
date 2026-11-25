@@ -11,6 +11,8 @@ const DEFAULT_BASE_URL := "http://127.0.0.1:8765"
 const CATALOG_PATH := "/chapters/catalog"
 const EXTRACTION_PATH := "/chapters/extraction"
 const ASSETS_PATH := "/assets/active"
+const EXTRACT_PATH := "/chapters/extract"  # H02: Tier 1 runs the existing run_chapter_extraction
+const EXTRACTABLE_STATES := ["not_extracted", "stale"]
 const FLAG_COLOR := Color(1.0, 0.72, 0.3)
 
 var base_url: String = OS.get_environment("ENGAIN_TIER1_URL") if OS.has_environment("ENGAIN_TIER1_URL") else DEFAULT_BASE_URL
@@ -19,6 +21,10 @@ var _selftest := OS.get_cmdline_user_args().has("--selftest")
 var _extract_check := ""
 ## --screenshot=<png path>: with --extract-check, save the window once the scene is drawn (needs a display).
 var _screenshot := ""
+## --extract-trigger: with --extract-check on an unextracted chapter, press Extract, wait, and report.
+var _extract_trigger := OS.get_cmdline_user_args().has("--extract-trigger")
+var _x_state := ""  # extraction state of the current selection, as Tier 1 reported it
+var _extracting := ""  # catalog_id of the extraction in flight ("" = none); blocks every new request
 
 var _http: HTTPRequest
 var _xhttp: HTTPRequest  # extraction requests; separate so a catalog refresh never collides
@@ -34,6 +40,7 @@ var _refresh: Button
 var _tree: Tree
 var _detail: RichTextLabel
 var _activate: Button
+var _extract: Button
 var _link: Node  # EngAInRuntimeLink: the only path to 8080; used on explicit request only
 
 
@@ -164,6 +171,8 @@ func _on_item_selected() -> void:
 
 func _request_extraction(catalog_id: String) -> void:
 	_xhttp.cancel_request()  # a newer selection replaces any request still in flight
+	_x_state = ""
+	_update_extract_button()
 	_ahttp.cancel_request()
 	_x_catalog_id = catalog_id
 	_x_reply = null
@@ -216,6 +225,8 @@ func _on_extraction_completed(result: int, code: int, _headers: PackedStringArra
 		_:
 			lines.append("[color=#ff8080]HTTP %d: %s[/color]" % [code, str(d.get("extraction", d.get("message", "error")))])
 	_show_extraction("\n".join(lines))
+	_x_state = state
+	_update_extract_button()
 	_x_reply = {"code": code, "data": d}
 	_try_render()
 
@@ -253,6 +264,12 @@ func _try_render() -> void:
 		# shortcut: draws the first game scene only (every current chapter has one); add a scene picker when one has more.
 		var label := "%s%s" % [keys[0], "  (1 of %d scenes)" % keys.size() if keys.size() > 1 else ""]
 		stats = _scene_view.render(scenes[keys[0]], label, _a_reply)
+	if _selftest and _extract_trigger and _x_state in EXTRACTABLE_STATES and _extracting.is_empty():
+		var enabled_before := not _extract.disabled
+		_on_extract_pressed()
+		print("[selftest] extract selected catalog_id=%s state=%s button_enabled_before=%s button_disabled_while_running=%s duplicate_blocked=%s" % [
+			_x_catalog_id, _x_state, enabled_before, _extract.disabled, not _start_allowed()])
+		return
 	if _selftest and not _extract_check.is_empty():
 		print("[selftest] extraction catalog_id=%s http=%d state=%s scenes=%d" % [_x_catalog_id, code, state, scenes.size() if state == "candidate" else (d.get("game_scenes", {}) as Dictionary).size()])
 		print("[selftest] render actors=%d assets=%s ids=%s skipped_missing_position=%d" % [
@@ -280,6 +297,65 @@ func _on_activate_pressed() -> void:
 		_status.text = "Activation refused (HTTP %d): %s" % [result.code,
 			JSON.stringify((body as Dictionary).get("errors", body.get("reason", body)) if body is Dictionary else body).left(300)]
 	_activate.disabled = _x_catalog_id != catalog_id or not _link.is_configured()["activate"]
+
+
+func _start_allowed() -> bool:
+	return _extracting.is_empty() and _x_state in EXTRACTABLE_STATES and not _x_catalog_id.is_empty()
+
+
+func _update_extract_button() -> void:
+	_extract.disabled = not _start_allowed()
+	_extract.text = "Extracting ..." if not _extracting.is_empty() else "Extract chapter"
+
+
+## Asks Tier 1 to run the existing extraction for the selected catalog_id, then polls until
+## it finishes. Extraction writes a Stageroom candidate only: it never activates or builds.
+func _on_extract_pressed() -> void:
+	if not _start_allowed():
+		return
+	var catalog_id := _x_catalog_id
+	_extracting = catalog_id
+	_update_extract_button()
+	var started := await _http_json(base_url + EXTRACT_PATH, HTTPClient.METHOD_POST, JSON.stringify({"catalog_id": catalog_id}))
+	var job: Dictionary = started.body
+	if started.code == 202:
+		var t0 := Time.get_ticks_msec()
+		while job.get("state") == "running":
+			_status.text = "Extracting %s — Mettaext running (%ds); candidate only, nothing is activated" % [
+				catalog_id, (Time.get_ticks_msec() - t0) / 1000]
+			await get_tree().create_timer(1.0).timeout
+			var polled := await _http_json("%s%s?catalog_id=%s" % [base_url, EXTRACT_PATH, catalog_id.uri_encode()], HTTPClient.METHOD_GET, "")
+			job = polled.body if polled.code == 200 else {"state": "error", "message": "status poll failed (HTTP %d)" % polled.code}
+	_extracting = ""
+	var receipt: Dictionary = job.get("receipt", {}) if job.get("receipt") is Dictionary else {}
+	if job.get("state") == "finished" and receipt.get("status") == "candidate":
+		_status.text = "Extracted %s — receipt %s, source %s, %d game scene(s). CANDIDATE — not accepted." % [
+			catalog_id, receipt.get("contract"), str(receipt.get("source_sha256")).left(12), (receipt.get("game_scenes", []) as Array).size()]
+	elif job.get("state") == "finished":
+		_status.text = "Extraction FAILED for %s — returncode %s (see run.log beside the receipt)" % [catalog_id, str(receipt.get("returncode"))]
+	else:
+		_status.text = "Extraction refused for %s (HTTP %d): %s" % [catalog_id, started.code, str(job.get("message", job.get("state", "?")))]
+	if _selftest:
+		print("[selftest] extract finished state=%s receipt_status=%s contract=%s" % [job.get("state"), receipt.get("status"), receipt.get("contract")])
+	# Refresh the preview from Tier 1 (the receipt is displayed there) if this chapter is still selected.
+	if _x_catalog_id == catalog_id:
+		_request_extraction(catalog_id)
+	else:
+		_update_extract_button()
+
+
+func _http_json(url: String, method: int, body: String) -> Dictionary:
+	var http := HTTPRequest.new()
+	http.timeout = 30.0
+	add_child(http)
+	var headers := PackedStringArray(["Content-Type: application/json"]) if method == HTTPClient.METHOD_POST else PackedStringArray()
+	if http.request(url, headers, method, body) != OK:
+		http.queue_free()
+		return {"code": 0, "body": {"state": "error", "message": "could not start request"}}
+	var r: Array = await http.request_completed
+	http.queue_free()
+	var parsed: Variant = JSON.parse_string((r[3] as PackedByteArray).get_string_from_utf8())
+	return {"code": r[1] if r[0] == HTTPRequest.RESULT_SUCCESS else 0, "body": parsed if parsed is Dictionary else {}}
 
 
 func _show_extraction(text: String) -> void:
@@ -344,6 +420,12 @@ func _build_ui() -> void:
 	_activate.disabled = true
 	_activate.pressed.connect(_on_activate_pressed)
 	header.add_child(_activate)
+	_extract = Button.new()
+	_extract.text = "Extract chapter"
+	_extract.tooltip_text = "Tier 1 runs the existing Mettaext extraction for this chapter. Produces a candidate only."
+	_extract.disabled = true
+	_extract.pressed.connect(_on_extract_pressed)
+	header.add_child(_extract)
 	_summary = Label.new()
 	_summary.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
