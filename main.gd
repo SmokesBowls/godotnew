@@ -24,6 +24,11 @@ var _screenshot := ""
 ## --extract-trigger: with --extract-check on an unextracted chapter, press Extract, wait, and report.
 var _extract_trigger := OS.get_cmdline_user_args().has("--extract-trigger")
 var _x_state := ""  # extraction state of the current selection, as Tier 1 reported it
+## H03: operator-triggered PROVISIONAL reference stage. Only offered when launched with a
+## build caller (tests/h03_reference_stage.py); never runs on selection or activation.
+var _stage_caller := OS.get_environment("ENGAIN_H03_BUILD_CALLER_URL").strip_edges()
+var _h03_selftest := OS.get_cmdline_user_args().has("--h03-construct")
+var _h03_done := false
 var _extracting := ""  # catalog_id of the extraction in flight ("" = none); blocks every new request
 
 var _http: HTTPRequest
@@ -41,6 +46,7 @@ var _tree: Tree
 var _detail: RichTextLabel
 var _activate: Button
 var _extract: Button
+var _stage: Button
 var _link: Node  # EngAInRuntimeLink: the only path to 8080; used on explicit request only
 
 
@@ -270,6 +276,12 @@ func _try_render() -> void:
 		print("[selftest] extract selected catalog_id=%s state=%s button_enabled_before=%s button_disabled_while_running=%s duplicate_blocked=%s" % [
 			_x_catalog_id, _x_state, enabled_before, _extract.disabled, not _start_allowed()])
 		return
+	if _selftest and _h03_selftest and state == "candidate" and not _h03_done:
+		_h03_done = true
+		await _on_activate_pressed()
+		var report: Dictionary = await _on_stage_pressed()
+		print("[selftest] h03 result=%s surfaces=%d status=%s" % [report.get("result"),
+			_scene_view.surface_container().get_child_count(), _status.text])
 	if _selftest and not _extract_check.is_empty():
 		print("[selftest] extraction catalog_id=%s http=%d state=%s scenes=%d" % [_x_catalog_id, code, state, scenes.size() if state == "candidate" else (d.get("game_scenes", {}) as Dictionary).size()])
 		print("[selftest] render actors=%d assets=%s ids=%s skipped_missing_position=%d" % [
@@ -297,6 +309,28 @@ func _on_activate_pressed() -> void:
 		_status.text = "Activation refused (HTTP %d): %s" % [result.code,
 			JSON.stringify((body as Dictionary).get("errors", body.get("reason", body)) if body is Dictionary else body).left(300)]
 	_activate.disabled = _x_catalog_id != catalog_id or not _link.is_configured()["activate"]
+
+
+## Asks the H03 build caller (an authorized `build` client) for the provisional reference stage
+## on the load this project presents, then consumes and applies it through EngAInRuntimeLink.
+func _on_stage_pressed() -> Dictionary:
+	var load: Dictionary = _link.presented_load()
+	if load.is_empty():
+		_status.text = "Reference stage needs a scene activated in the runtime first (Activate in runtime)."
+		return {"result": "NO_ACTIVE_LOAD"}
+	_stage.disabled = true
+	_status.text = "Constructing PROVISIONAL reference stage for %s (load %d) ..." % [load["scene_id"], load["load_seq"]]
+	var built := await _http_json(_stage_caller + "/h03/build", HTTPClient.METHOD_POST, JSON.stringify({"scene_activation": load}))
+	var report: Dictionary = {"result": "NOT_BUILT", "first_blocking_error": str(built.body.get("errors", built.body.get("message", "HTTP %d" % built.code)))}
+	if built.code == 200 and int(built.body.get("code", 0)) == 200:
+		report = await _link.apply_authorization(built.body)
+		await _http_json(_stage_caller + "/h03/consumed", HTTPClient.METHOD_POST, JSON.stringify(report))
+	if report.get("result") == "APPLIED":
+		_status.text = "PROVISIONAL TEST STAGE applied (100 x 100 m flat, provisional measurements — not manuscript terrain): %s" % report.get("surface_id")
+	else:
+		_status.text = "Reference stage not applied: %s" % str(report.get("first_blocking_error"))
+	_stage.disabled = false
+	return report
 
 
 func _start_allowed() -> bool:
@@ -426,6 +460,12 @@ func _build_ui() -> void:
 	_extract.disabled = true
 	_extract.pressed.connect(_on_extract_pressed)
 	header.add_child(_extract)
+	_stage = Button.new()
+	_stage.text = "Construct reference stage (PROVISIONAL TEST)"
+	_stage.tooltip_text = "Operator test: provisional 100 x 100 m flat stage built by Trixel through EngAInOS authorization."
+	_stage.visible = not _stage_caller.is_empty()
+	_stage.pressed.connect(_on_stage_pressed)
+	header.add_child(_stage)
 	_summary = Label.new()
 	_summary.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
