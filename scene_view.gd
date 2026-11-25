@@ -80,12 +80,12 @@ func render(scene: Dictionary, scene_label: String, assets: Dictionary) -> Dicti
 		if seen.has(eid):
 			stats.skipped_duplicate += 1
 			continue
-		var p := _position_dict(e)
+		var p := position_dict(e)
 		if p.is_empty():
 			stats.skipped_missing_position += 1  # never invent a position
 			continue
 		seen[eid] = true
-		var style := _resolve_style(manifest, eid, str(e.get("type", e.get("entity_type", "unknown"))))
+		var style := resolve_style(manifest, eid, str(e.get("type", e.get("entity_type", "unknown"))))
 		if str(style.get("mode", "procedural_capsule")) != "procedural_capsule":
 			stats.unsupported_mode += 1  # S03a renders capsules only; the actor still shows
 		var pos := Vector3(float(p.get("x", 0.0)), float(p.get("y", 0.0)), float(p.get("z", 0.0)))
@@ -117,7 +117,7 @@ func render(scene: Dictionary, scene_label: String, assets: Dictionary) -> Dicti
 
 
 ## Donor resolution order: entities[id] -> types[type] -> fallback.entity -> built-in capsule.
-func _resolve_style(manifest: Dictionary, eid: String, etype: String) -> Dictionary:
+static func resolve_style(manifest: Dictionary, eid: String, etype: String) -> Dictionary:
 	for cfg in [(manifest.get("entities", {}) as Dictionary).get(eid, {}),
 			(manifest.get("types", {}) as Dictionary).get(etype, {}),
 			(manifest.get("fallback", {}) as Dictionary).get("entity", {})]:
@@ -127,7 +127,7 @@ func _resolve_style(manifest: Dictionary, eid: String, etype: String) -> Diction
 
 
 ## Accepts position as {x,y,z} or [x,y,z], or transform.position in either form (donor _disk_position_dict).
-func _position_dict(e: Dictionary) -> Dictionary:
+static func position_dict(e: Dictionary) -> Dictionary:
 	for v: Variant in [e.get("position"), (e.get("transform", {}) as Dictionary).get("position") if e.get("transform") is Dictionary else null]:
 		if v is Dictionary:
 			return v

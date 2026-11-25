@@ -29,7 +29,14 @@ var _x_state := ""  # extraction state of the current selection, as Tier 1 repor
 var _stage_caller := OS.get_environment("ENGAIN_H03_BUILD_CALLER_URL").strip_edges()
 var _h03_selftest := OS.get_cmdline_user_args().has("--h03-construct")
 var _h03_done := false
-var _extracting := ""  # catalog_id of the extraction in flight ("" = none); blocks every new request
+var _extracting := ""
+## H04b: the independent world environment (overlay; the selector stays alive underneath).
+const WorldScene := preload("res://world_environment.tscn")
+var _world: Node = null
+var _open_world: Button
+var _world_check := OS.get_cmdline_user_args().has("--world-check")
+var _world_activate := OS.get_cmdline_user_args().has("--world-activate")
+var _world_check_done := false  # catalog_id of the extraction in flight ("" = none); blocks every new request
 
 var _http: HTTPRequest
 var _xhttp: HTTPRequest  # extraction requests; separate so a catalog refresh never collides
@@ -282,6 +289,9 @@ func _try_render() -> void:
 		var report: Dictionary = await _on_stage_pressed()
 		print("[selftest] h03 result=%s surfaces=%d status=%s" % [report.get("result"),
 			_scene_view.surface_container().get_child_count(), _status.text])
+	if _selftest and _world_check and not _world_check_done:
+		_world_check_done = true
+		await _selftest_world()
 	if _selftest and not _extract_check.is_empty():
 		print("[selftest] extraction catalog_id=%s http=%d state=%s scenes=%d" % [_x_catalog_id, code, state, scenes.size() if state == "candidate" else (d.get("game_scenes", {}) as Dictionary).size()])
 		print("[selftest] render actors=%d assets=%s ids=%s skipped_missing_position=%d" % [
@@ -331,6 +341,69 @@ func _on_stage_pressed() -> Dictionary:
 		_status.text = "Reference stage not applied: %s" % str(report.get("first_blocking_error"))
 	_stage.disabled = false
 	return report
+
+
+## Opens the world environment. Needs no activation and generates nothing: it shows the runtime.
+func open_world() -> Node:
+	if _world != null:
+		return _world
+	_world = WorldScene.instantiate()
+	get_tree().root.add_child(_world)
+	_link.set_surface_container(_world.surfaces)  # authorized Trixel geometry lands in the world
+	_world.closed.connect(close_world)
+	visible = false
+	var manifest: Dictionary = _a_reply.get("manifest", {}) if _a_reply is Dictionary and _a_reply.get("ok", false) else {}
+	_world.open(_link, manifest)
+	return _world
+
+
+## Back to the selector; its selection, extraction state and preview were never touched.
+func close_world() -> void:
+	if _world == null:
+		return
+	_link.set_surface_container(_scene_view.surface_container())
+	_world.queue_free()
+	_world = null
+	visible = true
+
+
+func _selftest_world() -> void:
+	var before := {"catalog_id": _x_catalog_id, "state": _x_state, "preview_actors": _scene_view.actor_count(),
+		"status": _status.text}
+	if _world_activate:
+		await _on_activate_pressed()
+		before["status"] = _status.text
+	var stamp_before: Variant = _link.normalize_load(((await _link.peek()).body.get("payload", {}) as Dictionary).get("scene_activation"))
+	var world := open_world()
+	await get_tree().process_frame
+	var result: Dictionary = await world.refresh()
+	result = result if result.get("state") != "unchanged" else {"state": "hydrated", "actors": world.actors.get_child_count(), "stamp": stamp_before}
+	var registered: bool = _link.surface_container() == world.surfaces
+	var cam_start: Vector3 = world.camera.global_position
+	Input.action_press("ui_up")
+	for i in 10:
+		await get_tree().process_frame
+	Input.action_release("ui_up")
+	var moved: float = world.camera.global_position.distance_to(cam_start)
+	var basis_before: Basis = world.camera.global_transform.basis
+	var look := InputEventMouseMotion.new()
+	look.relative = Vector2(40, 10)
+	world.handle_mouse_look(look)
+	var looked: bool = not world.camera.global_transform.basis.is_equal_approx(basis_before)
+	var stamp_after: Variant = _link.normalize_load(((await _link.peek()).body.get("payload", {}) as Dictionary).get("scene_activation"))
+	var actor_ids := PackedStringArray()
+	for a in world.actors.get_children():
+		actor_ids.append(str(a.get_meta("entity_id")))
+	print("[selftest] world opened=%s main_hidden=%s state=%s actors=%d ids=%s status=%s" % [
+		world.is_inside_tree(), not visible, result.get("state"), world.actors.get_child_count(), ",".join(actor_ids), world._status.text])
+	print("[selftest] world camera_moved=%.2f mouse_look=%s surfaces_registered=%s stamp_before=%s stamp_after=%s" % [
+		moved, looked, registered, JSON.stringify(stamp_before), JSON.stringify(stamp_after)])
+	world.close()
+	await get_tree().process_frame
+	var after := {"catalog_id": _x_catalog_id, "state": _x_state, "preview_actors": _scene_view.actor_count(), "status": _status.text}
+	print("[selftest] world returned main_visible=%s world_freed=%s selection_preserved=%s preview_preserved=%s surfaces_back_to_preview=%s" % [
+		visible, _world == null, before.catalog_id == after.catalog_id and before.state == after.state,
+		before.preview_actors == after.preview_actors, _link.surface_container() == _scene_view.surface_container()])
 
 
 func _start_allowed() -> bool:
@@ -460,6 +533,11 @@ func _build_ui() -> void:
 	_extract.disabled = true
 	_extract.pressed.connect(_on_extract_pressed)
 	header.add_child(_extract)
+	_open_world = Button.new()
+	_open_world.text = "Open World Environment"
+	_open_world.tooltip_text = "Separate world view of what the runtime holds. Does not activate or build anything."
+	_open_world.pressed.connect(open_world)
+	header.add_child(_open_world)
 	_stage = Button.new()
 	_stage.text = "Construct reference stage (PROVISIONAL TEST)"
 	_stage.tooltip_text = "Operator test: provisional 100 x 100 m flat stage built by Trixel through EngAInOS authorization."

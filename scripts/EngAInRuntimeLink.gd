@@ -59,6 +59,11 @@ func set_surface_container(node: Node3D) -> void:
 	_parents["%s|%s" % SURFACE_PARENT] = node
 
 
+## The node authorized Trixel surfaces currently attach under (null before registration).
+func surface_container() -> Node3D:
+	return _parents.get("%s|%s" % SURFACE_PARENT)
+
+
 func presented_load() -> Dictionary:
 	return _presented_load.duplicate(true)
 
