@@ -1,6 +1,6 @@
 # godotnew (EngAIn Chapter Selector) — Current State
 
-Last updated: 2026-11-25. Branch `main`, HEAD `a2c4bd4` (pushed through `509dfd4`; `341cc70`, `a2c4bd4` local only).
+Last updated: 2026-11-25. Branch `main`, all work pushed (see `git log -1`). Development paused for the manuscript rewrite.
 Godot 4.6.1, GL Compatibility. Entry scene: `res://main.tscn`. EngAIn: `~/Desktop/burdens_of_a_forgotten_past/EngAIn` (see its `docs/continuity/`).
 Push: origin is HTTPS without stored credentials — use `git push git@github.com:SmokesBowls/godotnew.git main`.
 
